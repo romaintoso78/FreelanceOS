@@ -1,0 +1,411 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─── ENUMS ────────────────────────────────────────────────────────────────────
+
+enum LegalStatus {
+  AUTO_ENTREPRENEUR
+  SASU
+  EURL
+}
+
+enum Plan {
+  STARTER
+  PRO
+  EXPERT
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  VIEWED
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+enum MissionStatus {
+  PROSPECT
+  IN_PROGRESS
+  COMPLETED
+  LOST
+}
+
+enum ContractStatus {
+  DRAFT
+  SENT
+  SIGNED
+  EXPIRED
+  ARCHIVED
+}
+
+enum FiscalEventType {
+  URSSAF
+  TVA
+  IS
+  CFE
+  OTHER
+}
+
+// ─── WORKSPACE (cœur du multi-tenant) ────────────────────────────────────────
+
+model Workspace {
+  id               String      @id @default(cuid())
+  clerkUserId      String      @unique
+  name             String
+  slug             String      @unique
+  legalStatus      LegalStatus @default(AUTO_ENTREPRENEUR)
+  siret            String?
+  vatNumber        String?
+  address          String?
+  city             String?
+  postalCode       String?
+  country          String      @default("FR")
+  email            String?
+  phone            String?
+  logoUrl          String?
+  stripeCustomerId String?     @unique
+  plan             Plan        @default(STARTER)
+  planExpiresAt    DateTime?
+  onboardingDone   Boolean     @default(false)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  deletedAt        DateTime?
+
+  clients           Client[]
+  invoices          Invoice[]
+  quotes            Quote[]
+  contracts         Contract[]
+  contractTemplates ContractTemplate[]
+  expenses          Expense[]
+  timeEntries       TimeEntry[]
+  fiscalEvents      FiscalEvent[]
+  notifications     Notification[]
+  subscriptions     Subscription[]
+  missions          Mission[]
+
+  @@index([clerkUserId])
+  @@index([slug])
+}
+
+// ─── SUBSCRIPTION ─────────────────────────────────────────────────────────────
+
+model Subscription {
+  id                   String    @id @default(cuid())
+  workspaceId          String
+  workspace            Workspace @relation(fields: [workspaceId], references: [id])
+  stripeSubscriptionId String    @unique
+  stripePriceId        String
+  status               String
+  currentPeriodStart   DateTime
+  currentPeriodEnd     DateTime
+  cancelAtPeriodEnd    Boolean   @default(false)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([workspaceId])
+}
+
+// ─── CLIENT ───────────────────────────────────────────────────────────────────
+
+model Client {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  name        String
+  email       String?
+  phone       String?
+  address     String?
+  city        String?
+  postalCode  String?
+  country     String    @default("FR")
+  siret       String?
+  vatNumber   String?
+  notes       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  missions  Mission[]
+  invoices  Invoice[]
+  quotes    Quote[]
+  contracts Contract[]
+
+  @@index([workspaceId])
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, deletedAt])
+}
+
+// ─── MISSION (pipeline CRM) ──────────────────────────────────────────────────
+
+model Mission {
+  id          String        @id @default(cuid())
+  workspaceId String
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id])
+  clientId    String
+  client      Client        @relation(fields: [clientId], references: [id])
+  title       String
+  description String?
+  status      MissionStatus @default(PROSPECT)
+  dailyRate   Decimal?      @db.Decimal(10, 2)
+  startDate   DateTime?
+  endDate     DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  deletedAt   DateTime?
+
+  invoices    Invoice[]
+  timeEntries TimeEntry[]
+
+  @@index([workspaceId])
+  @@index([workspaceId, status])
+  @@index([workspaceId, clientId])
+}
+
+// ─── INVOICE ──────────────────────────────────────────────────────────────────
+
+model Invoice {
+  id             String        @id @default(cuid())
+  workspaceId    String
+  workspace      Workspace     @relation(fields: [workspaceId], references: [id])
+  clientId       String
+  client         Client        @relation(fields: [clientId], references: [id])
+  missionId      String?
+  mission        Mission?      @relation(fields: [missionId], references: [id])
+  number         String
+  status         InvoiceStatus @default(DRAFT)
+  issueDate      DateTime
+  dueDate        DateTime
+  vatExempt      Boolean       @default(false)
+  subtotalHT     Decimal       @db.Decimal(10, 2)
+  vatAmount      Decimal       @db.Decimal(10, 2)
+  totalTTC       Decimal       @db.Decimal(10, 2)
+  notes          String?
+  pdfUrl         String?
+  sentAt         DateTime?
+  viewedAt       DateTime?
+  paidAt         DateTime?
+  cancelledAt    DateTime?
+  avoirReference String?
+  reminderSentAt DateTime[]
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  items InvoiceItem[]
+
+  @@unique([workspaceId, number])
+  @@index([workspaceId])
+  @@index([workspaceId, status])
+  @@index([workspaceId, issueDate])
+  @@index([workspaceId, dueDate])
+  @@index([clientId])
+}
+
+model InvoiceItem {
+  id          String  @id @default(cuid())
+  invoiceId   String
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  description String
+  quantity    Decimal @db.Decimal(10, 3)
+  unitPrice   Decimal @db.Decimal(10, 2)
+  vatRate     Decimal @db.Decimal(5, 2)
+  totalHT     Decimal @db.Decimal(10, 2)
+  position    Int
+
+  @@index([invoiceId])
+}
+
+// ─── QUOTE (devis) ────────────────────────────────────────────────────────────
+
+model Quote {
+  id          String      @id @default(cuid())
+  workspaceId String
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id])
+  clientId    String
+  client      Client      @relation(fields: [clientId], references: [id])
+  number      String
+  status      QuoteStatus @default(DRAFT)
+  issueDate   DateTime
+  validUntil  DateTime
+  subtotalHT  Decimal     @db.Decimal(10, 2)
+  vatAmount   Decimal     @db.Decimal(10, 2)
+  totalTTC    Decimal     @db.Decimal(10, 2)
+  notes       String?
+  pdfUrl      String?
+  sentAt      DateTime?
+  acceptedAt  DateTime?
+  rejectedAt  DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  deletedAt   DateTime?
+
+  items QuoteItem[]
+
+  @@unique([workspaceId, number])
+  @@index([workspaceId])
+  @@index([workspaceId, status])
+}
+
+model QuoteItem {
+  id          String  @id @default(cuid())
+  quoteId     String
+  quote       Quote   @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  description String
+  quantity    Decimal @db.Decimal(10, 3)
+  unitPrice   Decimal @db.Decimal(10, 2)
+  vatRate     Decimal @db.Decimal(5, 2)
+  totalHT     Decimal @db.Decimal(10, 2)
+  position    Int
+
+  @@index([quoteId])
+}
+
+// ─── CONTRACT ─────────────────────────────────────────────────────────────────
+
+model ContractTemplate {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  name        String
+  type        String
+  content     String
+  isDefault   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  contracts Contract[]
+
+  @@index([workspaceId])
+}
+
+model Contract {
+  id             String            @id @default(cuid())
+  workspaceId    String
+  workspace      Workspace         @relation(fields: [workspaceId], references: [id])
+  clientId       String
+  client         Client            @relation(fields: [clientId], references: [id])
+  templateId     String?
+  template       ContractTemplate? @relation(fields: [templateId], references: [id])
+  title          String
+  content        String
+  status         ContractStatus    @default(DRAFT)
+  signatureToken String?           @unique
+  signedAt       DateTime?
+  signerName     String?
+  signerEmail    String?
+  signerIp       String?
+  expiresAt      DateTime?
+  fileUrl        String?
+  sentAt         DateTime?
+  alertSentAt    DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  deletedAt      DateTime?
+
+  @@index([workspaceId])
+  @@index([workspaceId, status])
+  @@index([clientId])
+  @@index([signatureToken])
+}
+
+// ─── EXPENSE (V2) ─────────────────────────────────────────────────────────────
+
+model Expense {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  missionId   String?
+  description String
+  amount      Decimal   @db.Decimal(10, 2)
+  vatAmount   Decimal?  @db.Decimal(10, 2)
+  category    String
+  date        DateTime
+  receiptUrl  String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  @@index([workspaceId])
+  @@index([workspaceId, date])
+  @@index([workspaceId, category])
+}
+
+// ─── TIME ENTRY (V2) ─────────────────────────────────────────────────────────
+
+model TimeEntry {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  missionId   String
+  mission     Mission   @relation(fields: [missionId], references: [id])
+  description String?
+  startedAt   DateTime
+  stoppedAt   DateTime?
+  duration    Int?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([workspaceId])
+  @@index([missionId])
+  @@index([workspaceId, startedAt])
+}
+
+// ─── FISCAL EVENT ─────────────────────────────────────────────────────────────
+
+model FiscalEvent {
+  id          String          @id @default(cuid())
+  workspaceId String
+  workspace   Workspace       @relation(fields: [workspaceId], references: [id])
+  type        FiscalEventType
+  title       String
+  description String?
+  dueDate     DateTime
+  amount      Decimal?        @db.Decimal(10, 2)
+  isPaid      Boolean         @default(false)
+  paidAt      DateTime?
+  alertSentAt DateTime?
+  isRecurring Boolean         @default(false)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@index([workspaceId])
+  @@index([workspaceId, dueDate])
+  @@index([workspaceId, isPaid])
+}
+
+// ─── NOTIFICATION ─────────────────────────────────────────────────────────────
+
+model Notification {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  type        String
+  title       String
+  body        String?
+  isRead      Boolean   @default(false)
+  readAt      DateTime?
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+
+  @@index([workspaceId])
+  @@index([workspaceId, isRead])
+  @@index([workspaceId, createdAt])
+}
